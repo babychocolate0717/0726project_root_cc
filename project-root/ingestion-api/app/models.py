@@ -21,6 +21,9 @@ class EnergyRaw(Base):
     os_type = Column(String)
     os_version = Column(String)
     location = Column(String)
+    device_fingerprint = Column(String(16), nullable=True)
+    risk_level = Column(String(10), nullable=True)  
+    similarity_score = Column(Float, nullable=True)
 
 class EnergyCleaned(Base):
     __tablename__ = "energy_cleaned"
@@ -40,6 +43,8 @@ class EnergyCleaned(Base):
     os_type = Column(String)
     os_version = Column(String)
     location = Column(String)
+    risk_level = Column(String(10), nullable=True)  
+    similarity_score = Column(Float, nullable=True)
 
 # 新增：授權設備表
 class AuthorizedDevice(Base):

@@ -18,7 +18,7 @@ import socket
 
 # ---------- 配置設定 ----------
 API_BASE_URL = "http://localhost:8000"  # 您的 ingestion-api 地址
-AUTH_SECRET_KEY = "your-production-secret-key"  # 與 API 相同的密鑰
+AUTH_SECRET_KEY = "NTCUST-ENERGY-MONITOR"  # 🆕 更新與 API 相同的密鑰
 FALLBACK_TO_CSV = True  # 如果 API 不可用，是否儲存到 CSV
 
 # ---------- 上課節次時間設定 ----------
@@ -97,6 +97,23 @@ def get_auth_headers():
         "Device-Certificate": certificate
     }
 
+# ---------- 🆕 增強硬體資訊收集（用於指紋生成）----------
+def get_enhanced_system_info():
+    """收集更詳細的系統資訊用於設備指紋"""
+    try:
+        system_info = {
+            "cpu_model": platform.processor() or "Unknown",
+            "cpu_count": psutil.cpu_count(),
+            "total_memory": psutil.virtual_memory().total,
+            "disk_partitions": len(psutil.disk_partitions()),
+            "network_interfaces": len(psutil.net_if_addrs()),
+            "platform_machine": platform.machine(),
+            "platform_architecture": platform.architecture()[0]
+        }
+        return system_info
+    except:
+        return {}
+
 # ---------- 硬體數據擷取 (保持原有邏輯) ----------
 def get_gpu_model():
     try:
@@ -162,7 +179,7 @@ def get_device_info():
     return (
         str(uuid.getnode()),
         getpass.getuser(),
-        "v1.1.0",  # 升級版本號
+        "v1.2.0",  # 🆕 升級版本號支援指紋功能
         platform.system(),
         platform.version(),
         "Taipei, Taiwan"
@@ -202,8 +219,24 @@ def send_to_api(data):
         
         if response.status_code == 200:
             result = response.json()
+            
+            # 🆕 顯示指紋檢查結果
+            if "fingerprint_check" in result:
+                fp_result = result["fingerprint_check"]
+                risk_level = fp_result.get("risk_level", "unknown")
+                message = fp_result.get("message", "")
+                similarity = fp_result.get("similarity_score", 0)
+                
+                if risk_level == "high":
+                    print(f"⚠️ 高風險設備警告: {message} (相似度: {similarity:.2f})")
+                elif risk_level == "medium":
+                    print(f"⚡ 中風險提醒: {message} (相似度: {similarity:.2f})")
+                else:
+                    print(f"✅ 設備正常: {message} (相似度: {similarity:.2f})")
+            
             print(f"✅ 資料已成功傳送到 API: {result.get('status', 'unknown')}")
             return True
+            
         elif response.status_code == 401:
             print(f"❌ 認證失敗: {response.json().get('detail', 'Unknown auth error')}")
             return False
@@ -259,6 +292,9 @@ def process_and_send_data():
     disk_read, disk_write = get_disk_read_write_rate(interval=1)
     system_power = get_system_power(cpu_power, gpu_power, memory_used)
 
+    # 🆕 收集增強的系統資訊（指紋相關）
+    enhanced_info = get_enhanced_system_info()
+
     data = {
         "timestamp": timestamp,
         "cpu": cpu_power,
@@ -274,7 +310,9 @@ def process_and_send_data():
         "agent_version": agent_version,
         "os_type": os_type,
         "os_version": os_version,
-        "location": location
+        "location": location,
+        # 🆕 新增增強系統資訊
+        **enhanced_info
     }
 
     print("\n========== 資料輸出 ==========")
@@ -338,6 +376,7 @@ def check_api_connection():
     # 檢查設備是否已註冊
     mac_address = get_mac_address()
     print(f"🔍 設備 MAC 地址: {mac_address}")
+    print(f"🔧 設備指紋功能: 已啟用")  # 🆕 新增指紋狀態顯示
     
     try:
         headers = get_auth_headers()
@@ -348,12 +387,8 @@ def check_api_connection():
             print(f"✅ 設備已註冊: {device_info['device_name']}")
             return True
         elif response.status_code == 404:
-            print("⚠️ 設備尚未註冊到白名單")
-            print("📝 請使用以下指令註冊設備:")
-            print(f'curl -X POST "{API_BASE_URL}/admin/devices" \\')
-            print('  -H "Content-Type: application/json" \\')
-            print(f'  -d \'{{"mac_address": "{mac_address}", "device_name": "您的設備名稱", "user_name": "您的姓名"}}\'')
-            return False
+            print("⚠️ 設備尚未註冊到白名單，但指紋功能仍可運作")
+            return True  # 🆕 指紋模式下無需白名單也可運作
         else:
             print(f"❌ 檢查設備註冊狀態失敗: {response.status_code}")
             return False
@@ -368,6 +403,7 @@ def main():
     print("🚀 Agent 啟動中...")
     print(f"📡 API 地址: {API_BASE_URL}")
     print(f"🔐 MAC 地址: {get_mac_address()}")
+    print(f"🆕 版本: v1.2.0 (支援設備指紋)")  # 🆕 版本資訊
     
     # 初始化檢查
     api_available = check_api_connection()
