@@ -2,6 +2,7 @@ services:
   db:
     image: postgres:13
     restart: always
+    # 🏫 使用學術友善的 DNS
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -14,7 +15,6 @@ services:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "5433:5432"
-    # 資料庫記憶體配置
     deploy:
       resources:
         limits:
@@ -37,19 +37,16 @@ services:
     depends_on:
       - db
       - cleaner
-    # ingestion-api 記憶體配置
     deploy:
       resources:
         limits:
-          memory: 512M      # 最大記憶體限制
-          cpus: '1.0'       # CPU 限制
+          memory: 512M
+          cpus: '1.0'
         reservations:
-          memory: 256M      # 保證最小記憶體
-          cpus: '0.5'       # 保證最小 CPU
-    # 環境變數優化
+          memory: 256M
+          cpus: '0.5'
     environment:
       - PYTHONUNBUFFERED=1
-      # 注意：移除 WORKERS 和 MAX_CONNECTIONS，因為你的應用沒有使用這些變數
       - AUTH_SECRET_KEY=NTCUST-ENERGY-MONITOR
       - COMPATIBILITY_MODE=true
       - DEFAULT_ALLOWED_IPS=""
@@ -67,12 +64,11 @@ services:
     ports:
       - "8100:8100"
     depends_on:
-      - db  # cleaner 可能也需要資料庫
-    # 清洗服務記憶體配置
+      - db
     deploy:
       resources:
         limits:
-          memory: 1G        # 資料清洗可能需要更多記憶體
+          memory: 1G
         reservations:
           memory: 512M
 

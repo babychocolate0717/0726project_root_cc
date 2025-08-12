@@ -1,15 +1,20 @@
-FROM python:3.10-slim 
+FROM python:3.10
 
 WORKDIR /code
 
-# 先複製 requirements.txt 利用 Docker 快取
+# 複製 requirements.txt
 COPY requirements.txt .
 
-# 使用 --no-cache-dir 減少映像檔大小
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    # 清理 pip 快取
-    rm -rf /root/.cache/pip
+# 🏫 使用清華大學鏡像站
+RUN pip install --no-cache-dir --upgrade pip \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 安裝套件
+RUN pip install --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    --trusted-host pypi.tuna.tsinghua.edu.cn \
+    -r requirements.txt
 
 COPY ./app ./app
 
@@ -20,14 +25,14 @@ ENV DEFAULT_ALLOWED_IPS=""
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# 🆕 新增設備指紋相關環境變數
+# 新增設備指紋相關環境變數
 ENV FINGERPRINT_ENABLED=true
 ENV FINGERPRINT_SIMILARITY_THRESHOLD=0.7
 ENV HIGH_RISK_THRESHOLD=0.7
 ENV MEDIUM_RISK_THRESHOLD=0.9
-
 ENV WHITELIST_REQUIRED=false
-# 建立非 root 使用者（安全性最佳實踐）
+
+# 建立非 root 使用者
 RUN useradd --create-home --shell /bin/bash app
 USER app
 
