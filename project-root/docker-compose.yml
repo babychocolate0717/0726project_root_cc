@@ -2,7 +2,6 @@ services:
   db:
     image: postgres:13
     restart: always
-    # 🏫 使用學術友善的 DNS
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -13,6 +12,8 @@ services:
       POSTGRES_DB: energy
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # 🆕 添加初始化腳本
+      - ./ingestion-api/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5433:5432"
     deploy:
@@ -21,6 +22,12 @@ services:
           memory: 1G
         reservations:
           memory: 512M
+    # 🆕 添加健康檢查
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d energy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   ingestion:
     build:
@@ -35,8 +42,10 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - db
-      - cleaner
+      db:
+        condition: service_healthy  # 🆕 等待資料庫健康
+      cleaner:
+        condition: service_started
     deploy:
       resources:
         limits:
@@ -50,6 +59,8 @@ services:
       - AUTH_SECRET_KEY=NTCUST-ENERGY-MONITOR
       - COMPATIBILITY_MODE=true
       - DEFAULT_ALLOWED_IPS=""
+      # 🆕 添加資料庫連接字串
+      - DATABASE_URL=postgresql://user:password@db:5432/energy
 
   cleaner:
     build:
@@ -64,13 +75,17 @@ services:
     ports:
       - "8100:8100"
     depends_on:
-      - db
+      db:
+        condition: service_healthy  # 🆕 等待資料庫健康
     deploy:
       resources:
         limits:
           memory: 1G
         reservations:
           memory: 512M
+    environment:
+      # 🆕 添加資料庫連接字串（如果需要）
+      - DATABASE_URL=postgresql://user:password@db:5432/energy
 
 volumes:
   pgdata:

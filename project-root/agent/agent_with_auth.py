@@ -1,4 +1,4 @@
-# agent_with_auth.py
+# agent_with_auth.py (僅功耗計算，移除碳排放計算)
 import psutil
 import platform
 import uuid
@@ -114,7 +114,7 @@ def get_enhanced_system_info():
     except:
         return {}
 
-# ---------- 硬體數據擷取 (保持原有邏輯) ----------
+# ---------- 🔧 改進的硬體數據擷取與功耗計算 ----------
 def get_gpu_model():
     try:
         result = subprocess.run(
@@ -141,20 +141,116 @@ def get_gpu_usage():
         return 0
 
 def get_gpu_power_watt():
+    """
+    獲取 GPU 功耗（W）
+    優先使用 nvidia-smi，若失敗則根據使用率估算
+    """
     try:
+        # 方法 1：直接從 nvidia-smi 獲取實際功耗
         result = subprocess.run(
             ['nvidia-smi', '--query-gpu=power.draw', '--format=csv,noheader,nounits'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-        if result.stderr:
-            return 0
-        power = result.stdout.decode('utf-8').strip()
-        return float(power) if power else 0
+        if result.returncode == 0 and not result.stderr:
+            power = result.stdout.decode('utf-8').strip()
+            if power and power != "N/A":
+                return float(power)
     except:
-        return 0
+        pass
+    
+    # 方法 2：根據 GPU 使用率估算功耗
+    gpu_usage = get_gpu_usage()
+    gpu_model = get_gpu_model().lower()
+    
+    # 根據 GPU 型號設定功耗範圍
+    if "mx250" in gpu_model:
+        # MX250: 基礎 5W，滿載 25W
+        base_power = 5.0
+        max_power = 25.0
+    elif "rtx" in gpu_model:
+        # RTX 系列: 基礎 20W，滿載依型號而定
+        if "4090" in gpu_model:
+            base_power, max_power = 50.0, 450.0
+        elif "4080" in gpu_model:
+            base_power, max_power = 40.0, 320.0
+        elif "4070" in gpu_model:
+            base_power, max_power = 30.0, 200.0
+        else:
+            base_power, max_power = 25.0, 250.0  # 一般 RTX
+    elif "gtx" in gpu_model:
+        # GTX 系列
+        base_power, max_power = 15.0, 180.0
+    else:
+        # 未知 GPU，保守估計
+        base_power, max_power = 10.0, 75.0
+    
+    # 根據使用率計算功耗
+    additional_power = (gpu_usage / 100.0) * (max_power - base_power)
+    estimated_power = base_power + additional_power
+    
+    return round(estimated_power, 2)
 
 def get_cpu_power():
-    return round(psutil.cpu_percent(interval=1) * 0.5, 2)
+    """
+    改進的 CPU 功耗計算
+    基於 CPU 使用率和處理器類型估算功耗
+    """
+    cpu_percent = psutil.cpu_percent(interval=1)
+    
+    # 獲取 CPU 資訊用於功耗估算
+    try:
+        cpu_info = platform.processor().lower()
+        cpu_count = psutil.cpu_count()
+    except:
+        cpu_info = ""
+        cpu_count = 4  # 預設值
+    
+    # 根據 CPU 類型和核心數估算功耗範圍
+    if "intel" in cpu_info:
+        if "i9" in cpu_info or "xeon" in cpu_info:
+            # 高階 Intel CPU
+            base_power = 15.0 + (cpu_count * 2)  # 每核心約 2W 基礎
+            max_additional = 50.0 + (cpu_count * 5)  # 每核心約 5W 額外
+        elif "i7" in cpu_info:
+            # 中高階 Intel CPU
+            base_power = 12.0 + (cpu_count * 1.5)
+            max_additional = 35.0 + (cpu_count * 4)
+        elif "i5" in cpu_info:
+            # 中階 Intel CPU
+            base_power = 10.0 + (cpu_count * 1.2)
+            max_additional = 25.0 + (cpu_count * 3)
+        else:
+            # 一般 Intel CPU
+            base_power = 8.0 + (cpu_count * 1)
+            max_additional = 20.0 + (cpu_count * 2.5)
+    elif "amd" in cpu_info:
+        if "ryzen 9" in cpu_info or "threadripper" in cpu_info:
+            # 高階 AMD CPU
+            base_power = 15.0 + (cpu_count * 1.8)
+            max_additional = 45.0 + (cpu_count * 4.5)
+        elif "ryzen 7" in cpu_info:
+            # 中高階 AMD CPU
+            base_power = 12.0 + (cpu_count * 1.4)
+            max_additional = 30.0 + (cpu_count * 3.5)
+        elif "ryzen 5" in cpu_info:
+            # 中階 AMD CPU
+            base_power = 10.0 + (cpu_count * 1.2)
+            max_additional = 25.0 + (cpu_count * 3)
+        else:
+            # 一般 AMD CPU
+            base_power = 8.0 + (cpu_count * 1)
+            max_additional = 20.0 + (cpu_count * 2.5)
+    else:
+        # 未知 CPU，根據核心數保守估計
+        base_power = 10.0 + (cpu_count * 1)
+        max_additional = 25.0 + (cpu_count * 3)
+    
+    # 根據使用率計算額外功耗
+    additional_power = (cpu_percent / 100.0) * max_additional
+    
+    total_power = base_power + additional_power
+    
+    return round(total_power, 2)
 
 def get_memory_usage():
     memory = psutil.virtual_memory()
@@ -170,7 +266,64 @@ def get_disk_read_write_rate(interval=1):
     return round(read_rate, 2), round(write_rate, 2)
 
 def get_system_power(cpu, gpu, memory):
-    return cpu + gpu + (memory * 0.1)
+    """
+    改進的系統總功耗計算
+    基於實際硬體功耗模型
+    """
+    # 記憶體功耗：DDR4/DDR5 每 GB 約 3-4W
+    memory_gb = memory / 1024.0  # 轉換為 GB
+    memory_power = memory_gb * 3.5  # 每 GB 3.5W
+    
+    # 基礎系統功耗（主機板、風扇、SSD、網卡等）
+    motherboard_power = 15.0  # 主機板
+    cooling_power = 5.0  # 風扇
+    storage_power = 5.0  # SSD/HDD
+    other_power = 10.0  # 其他（網卡、USB設備等）
+    
+    base_system_power = motherboard_power + cooling_power + storage_power + other_power
+    
+    # 計算總功耗
+    total_power = cpu + gpu + memory_power + base_system_power
+    
+    # 電源效率損耗（80 Plus 認證約 85-95% 效率）
+    # 假設 90% 效率，所以實際消耗要除以 0.9
+    efficiency_factor = 1.11  # 1/0.9 ≈ 1.11
+    
+    final_power = total_power * efficiency_factor
+    
+    return round(final_power, 2)
+
+def validate_power_readings(data):
+    """
+    驗證功耗讀數的合理性，防止異常值
+    根據實際硬體規格設定上限
+    """
+    # 設定合理上限
+    limits = {
+        'cpu': 125.0,     # 高階桌機 CPU 上限
+        'gpu': 500.0,     # 高階 GPU 上限（如 RTX 4090）
+        'system_power': 800.0  # 高階工作站合理上限
+    }
+    
+    warnings = []
+    
+    # 檢查並修正異常值
+    for key, limit in limits.items():
+        if key in data and data[key] > limit:
+            warnings.append(f"{key}: {data[key]}W -> {limit}W")
+            data[key] = limit
+    
+    # 邏輯性檢查：系統功耗不應小於 CPU + GPU 功耗
+    min_system_power = data.get('cpu', 0) + data.get('gpu', 0) + 20  # 至少多 20W
+    if 'system_power' in data and data['system_power'] < min_system_power:
+        warnings.append(f"system_power: {data['system_power']}W -> {min_system_power}W (邏輯調整)")
+        data['system_power'] = min_system_power
+    
+    # 如果有警告，顯示修正資訊
+    if warnings:
+        print(f"⚠️  功耗數值修正: {', '.join(warnings)}")
+    
+    return data
 
 def get_timestamp():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
@@ -179,7 +332,7 @@ def get_device_info():
     return (
         str(uuid.getnode()),
         getpass.getuser(),
-        "v1.2.0",  # 🆕 升級版本號支援指紋功能
+        "v1.4.0",  # 🆕 升級版本號（功耗優化版）
         platform.system(),
         platform.version(),
         "Taipei, Taiwan"
@@ -187,12 +340,13 @@ def get_device_info():
 
 # ---------- 資料傳送 (新增 API 功能) ----------
 def send_to_api(data):
-    """發送資料到 ingestion-api"""
+    """發送資料到 ingestion-api（包含設備指紋用於安全檢測）"""
     try:
         headers = get_auth_headers()
         
-        # 轉換資料格式以符合 API schema
+        # 🔐 完整的資料傳送（包含設備指紋用於安全檢測）
         api_data = {
+            # 基本能耗數據
             "timestamp_utc": data["timestamp"],
             "gpu_model": data["gpu_model"],
             "gpu_usage_percent": data["gpu_usage"],
@@ -207,8 +361,21 @@ def send_to_api(data):
             "agent_version": data["agent_version"],
             "os_type": data["os_type"],
             "os_version": data["os_version"],
-            "location": data["location"]
+            "location": data["location"],
+            
+            # 🔐 設備指紋（用於安全檢測）
+            "cpu_model": data.get("cpu_model"),
+            "cpu_count": data.get("cpu_count"),
+            "total_memory": data.get("total_memory"),
+            "disk_partitions": data.get("disk_partitions"),
+            "network_interfaces": data.get("network_interfaces"),
+            "platform_machine": data.get("platform_machine"),
+            "platform_architecture": data.get("platform_architecture")
         }
+        
+        print(f"🔐 傳送數據（含設備指紋）到 API...")
+        print(f"📊 基本數據: CPU={data['cpu']}W, GPU={data['gpu']}W, 系統={data['system_power']}W")
+        print(f"🔍 設備指紋: {data.get('cpu_model', 'Unknown')} ({data.get('cpu_count', 'Unknown')} cores)")
         
         response = requests.post(
             f"{API_BASE_URL}/ingest",
@@ -220,7 +387,7 @@ def send_to_api(data):
         if response.status_code == 200:
             result = response.json()
             
-            # 🆕 顯示指紋檢查結果
+            # 🔐 顯示指紋檢查結果
             if "fingerprint_check" in result:
                 fp_result = result["fingerprint_check"]
                 risk_level = fp_result.get("risk_level", "unknown")
@@ -278,23 +445,25 @@ def save_to_csv(row):
         data_buffer = []
         file_count += 1
 
-# ---------- 資料處理和儲存 ----------
+# ---------- 🔧 優化的資料處理和儲存 ----------
 def process_and_send_data():
-    """處理和發送資料"""
+    """處理和發送資料（優化功耗計算）"""
     device_id, user_id, agent_version, os_type, os_version, location = get_device_info()
     timestamp = get_timestamp()
 
+    # 收集硬體數據
     gpu_model = get_gpu_model()
     gpu_usage = get_gpu_usage()
-    gpu_power = get_gpu_power_watt()
-    cpu_power = get_cpu_power()
+    gpu_power = get_gpu_power_watt()  # 改進的 GPU 功耗計算
+    cpu_power = get_cpu_power()      # 改進的 CPU 功耗計算
     memory_used = get_memory_usage()
     disk_read, disk_write = get_disk_read_write_rate(interval=1)
-    system_power = get_system_power(cpu_power, gpu_power, memory_used)
+    system_power = get_system_power(cpu_power, gpu_power, memory_used)  # 改進的系統功耗計算
 
     # 🆕 收集增強的系統資訊（指紋相關）
     enhanced_info = get_enhanced_system_info()
 
+    # 準備數據
     data = {
         "timestamp": timestamp,
         "cpu": cpu_power,
@@ -311,13 +480,25 @@ def process_and_send_data():
         "os_type": os_type,
         "os_version": os_version,
         "location": location,
-        # 🆕 新增增強系統資訊
+        
+        # 🆕 增強系統資訊
         **enhanced_info
     }
 
-    print("\n========== 資料輸出 ==========")
+    # 🔧 驗證並修正功耗數據
+    data = validate_power_readings(data)
+
+    # 🔧 顯示改進的功耗資訊
+    print(f"\n🔋 功耗監控 - CPU: {data['cpu']}W | GPU: {data['gpu']}W | 系統: {data['system_power']}W")
+    print(f"💾 記憶體: {data['memory']:.1f}MB ({data['memory']/1024:.1f}GB)")
+    print(f"🖥️ GPU: {data['gpu_model']} ({data['gpu_usage']}%)")
+
+    print("\n========== 完整資料輸出 ==========")
     for k, v in data.items():
-        print(f"{k}: {v}")
+        if isinstance(v, float):
+            print(f"{k}: {v:.2f}")
+        else:
+            print(f"{k}: {v}")
     
     # 嘗試發送到 API
     api_success = send_to_api(data)
@@ -376,7 +557,8 @@ def check_api_connection():
     # 檢查設備是否已註冊
     mac_address = get_mac_address()
     print(f"🔍 設備 MAC 地址: {mac_address}")
-    print(f"🔧 設備指紋功能: 已啟用")  # 🆕 新增指紋狀態顯示
+    print(f"🔧 設備指紋功能: 已啟用")
+    print(f"⚡ 功耗計算: 已優化 (智能估算)")
     
     try:
         headers = get_auth_headers()
@@ -388,7 +570,7 @@ def check_api_connection():
             return True
         elif response.status_code == 404:
             print("⚠️ 設備尚未註冊到白名單，但指紋功能仍可運作")
-            return True  # 🆕 指紋模式下無需白名單也可運作
+            return True
         else:
             print(f"❌ 檢查設備註冊狀態失敗: {response.status_code}")
             return False
@@ -403,7 +585,7 @@ def main():
     print("🚀 Agent 啟動中...")
     print(f"📡 API 地址: {API_BASE_URL}")
     print(f"🔐 MAC 地址: {get_mac_address()}")
-    print(f"🆕 版本: v1.2.0 (支援設備指紋)")  # 🆕 版本資訊
+    print(f"🆕 版本: v1.4.0 (智能功耗計算)")
     
     # 初始化檢查
     api_available = check_api_connection()

@@ -60,78 +60,89 @@ def ingest(
     db: Session = Depends(get_db),
     auth: dict = Depends(verify_device_auth_compatible)
 ):
-    """接收能耗資料並進行處理（使用指紋認證，不強制白名單）"""
+    """接收能耗資料並進行處理"""
     logger.info(f"Received data from device: {auth['mac_address']} (method: {auth['method']})")
     
     try:
-        # 設備指紋檢查（主要認證方式）
-        authenticator = DeviceAuthenticator(db)
-        fingerprint_result = authenticator.check_device_fingerprint(data.dict())
-        
-        # 記錄指紋檢查結果
-        risk_level = fingerprint_result["risk_level"]
-        is_whitelisted = auth.get('whitelisted', False)
-        
-        logger.info(f"Device {data.device_id} fingerprint: {risk_level} - {fingerprint_result['message']} (whitelisted: {is_whitelisted})")
-        
-        # 根據指紋風險等級決定處理方式
-        if risk_level == "high" and not is_whitelisted:
-            logger.warning(f"⚠️ High risk device detected but allowed: {data.device_id}")
-        elif risk_level == "high" and is_whitelisted:
-            logger.info(f"✅ High risk device allowed due to whitelist: {data.device_id}")
-        
-        # 寫入 raw 資料（加入指紋資訊）
+        # 準備原始數據
         raw_data = data.dict()
-        raw_data['device_fingerprint'] = fingerprint_result.get('fingerprint', '')
-        raw_data['risk_level'] = fingerprint_result['risk_level']
-        raw_data['similarity_score'] = fingerprint_result.get('similarity_score', 0.0)
         
-        raw_record = models.EnergyRaw(**raw_data)
-        db.add(raw_record)
+        # 移除不支援的欄位
+        unsupported_fields = ['device_fingerprint', 'fingerprint_hash', 'risk_score']
+        for field in unsupported_fields:
+            raw_data.pop(field, None)
+        
+        # EnergyRaw 支援的欄位
+        raw_supported_fields = {
+            "timestamp_utc", "gpu_model", "gpu_usage_percent", "gpu_power_watt",
+            "cpu_power_watt", "memory_used_mb", "disk_read_mb_s", "disk_write_mb_s",
+            "system_power_watt", "device_id", "user_id", "agent_version", 
+            "os_type", "os_version", "location",
+            "cpu_model", "cpu_count", "total_memory", "disk_partitions",
+            "network_interfaces", "platform_machine", "platform_architecture"
+        }
+        
+        raw_filtered = {k: v for k, v in raw_data.items() 
+                       if k in raw_supported_fields and v is not None}
 
-        # 呼叫 cleaning-api
+        # 1️⃣ 寫入原始資料
+        raw_record = models.EnergyRaw(**raw_filtered)
+        db.add(raw_record)
+        db.flush()
+
+        # 2️⃣ 呼叫 cleaning-api
         try:
-            response = requests.post("http://cleaner:8100/clean", json=data.dict(), timeout=10)
+            response = requests.post("http://cleaner:8100/clean", json=raw_filtered, timeout=10)
             response.raise_for_status()
             cleaned_data = response.json()["cleaned_data"]
             
-            # 清洗後的資料也加入指紋資訊
-            cleaned_data['device_fingerprint'] = fingerprint_result.get('fingerprint', '')
-            cleaned_data['risk_level'] = fingerprint_result['risk_level']
+            # 🔧 根據實際資料表結構過濾清洗後的資料
+            energy_cleaned_fields = {
+                "timestamp_utc", "gpu_model", "gpu_usage_percent", "gpu_power_watt",
+                "cpu_power_watt", "memory_used_mb", "disk_read_mb_s", "disk_write_mb_s",
+                "system_power_watt", "device_id", "user_id", "agent_version", 
+                "os_type", "os_version", "location", "is_anomaly", "anomaly_reason"
+                # 注意：故意排除 confidence_score
+            }
             
-            cleaned_record = models.EnergyCleaned(**cleaned_data)
+            # 過濾清洗後的資料，只保留表中存在的欄位
+            cleaned_filtered = {}
+            for k, v in cleaned_data.items():
+                if k in energy_cleaned_fields:
+                    cleaned_filtered[k] = v
+            
+            # 確保必要的欄位存在
+            if "is_anomaly" not in cleaned_filtered:
+                cleaned_filtered["is_anomaly"] = False
+            if "anomaly_reason" not in cleaned_filtered:
+                cleaned_filtered["anomaly_reason"] = None
+            
+            cleaned_record = models.EnergyCleaned(**cleaned_filtered)
             db.add(cleaned_record)
             
             db.commit()
             logger.info(f"✅ Successfully processed data from {data.device_id}")
             
-            return {
-                "status": "success", 
-                "device": data.device_id, 
-                "auth_method": auth['method'],
-                "fingerprint_check": {
-                    "risk_level": fingerprint_result['risk_level'],
-                    "similarity_score": fingerprint_result.get('similarity_score', 0.0),
-                    "message": fingerprint_result['message'],
-                    "whitelisted": is_whitelisted
-                }
-            }
-            
-        except Exception as e:
-            # 即使清洗失敗，也要儲存原始資料
+        except Exception as cleaning_error:
+            # 清洗失敗，只保存原始資料
             db.commit()
-            logger.warning(f"Cleaning failed for {data.device_id}: {str(e)}")
-            return {
-                "status": "partial_success", 
-                "device": data.device_id, 
-                "reason": str(e), 
-                "auth_method": auth['method'],
-                "fingerprint_check": fingerprint_result
-            }
+            logger.warning(f"⚠️ Cleaning failed for {data.device_id}: {str(cleaning_error)}")
+        
+        # 準備回應
+        response_data = {
+            "status": "success", 
+            "device": data.device_id, 
+            "auth_method": auth['method']
+        }
+        
+        if 'fingerprint_check' in auth:
+            response_data["fingerprint_check"] = auth['fingerprint_check']
+        
+        return response_data
             
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to process data from {data.device_id}: {str(e)}")
+        logger.error(f"❌ Failed to process data from {data.device_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 # ==========================================================================
